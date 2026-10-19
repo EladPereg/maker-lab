@@ -1,0 +1,837 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MAKER-LAB // 3D Print Queue & Cloud Command Center</title>
+
+    <!-- React & ReactDOM -->
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+    <!-- Babel for JSX -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Canvas Confetti -->
+    <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.6.0/dist/confetti.browser.min.js"></script>
+    <!-- JSZip -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <!-- Supabase JS SDK -->
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Rubik:wght@300;400;500;600;700&display=swap');
+
+        html, body {
+            background-color: #030407 !important;
+            color: #f1f5f9;
+            min-height: 100vh;
+            margin: 0;
+            padding: 0;
+            font-family: 'Plus Jakarta Sans', 'Rubik', sans-serif;
+            overflow-x: hidden;
+        }
+
+        body {
+            background: radial-gradient(circle at 50% 0%, #120c08 0%, #030407 70%) !important;
+        }
+
+        .cad-grid {
+            background-image: 
+                linear-gradient(to right, rgba(249, 115, 22, 0.06) 1px, transparent 1px),
+                linear-gradient(to bottom, rgba(249, 115, 22, 0.06) 1px, transparent 1px);
+            background-size: 45px 45px;
+        }
+
+        @keyframes floatOrb1 {
+            0%, 100% { transform: translate(0, 0) scale(1); }
+            50% { transform: translate(50px, 70px) scale(1.3); }
+        }
+        @keyframes floatOrb2 {
+            0%, 100% { transform: translate(0, 0) scale(1); }
+            50% { transform: translate(-60px, -50px) scale(1.4); }
+        }
+        .orb-1 { animation: floatOrb1 10s ease-in-out infinite; }
+        .orb-2 { animation: floatOrb2 12s ease-in-out infinite; }
+
+        @keyframes rotateCube {
+            0% { transform: rotateX(0deg) rotateY(0deg); }
+            100% { transform: rotateX(360deg) rotateY(360deg); }
+        }
+        .wireframe-cube {
+            width: 120px;
+            height: 120px;
+            position: relative;
+            transform-style: preserve-3d;
+            animation: rotateCube 18s linear infinite;
+        }
+        .cube-face {
+            position: absolute;
+            width: 120px;
+            height: 120px;
+            border: 1px solid rgba(249, 115, 22, 0.6);
+            background: rgba(249, 115, 22, 0.08);
+            box-shadow: inset 0 0 20px rgba(249, 115, 22, 0.2);
+        }
+        .cube-front  { transform: translateZ(60px); }
+        .cube-back   { transform: rotateY(180deg) translateZ(60px); }
+        .cube-right  { transform: rotateY(90deg) translateZ(60px); }
+        .cube-left   { transform: rotateY(-90deg) translateZ(60px); }
+        .cube-top    { transform: rotateX(90deg) translateZ(60px); }
+        .cube-bottom { transform: rotateX(-90deg) translateZ(60px); }
+
+        .glass-panel {
+            background: rgba(14, 16, 23, 0.85);
+            backdrop-filter: blur(24px);
+            -webkit-backdrop-filter: blur(24px);
+            border: 1px solid rgba(249, 115, 22, 0.3);
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.9), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+            transition: all 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+        .glass-panel:hover {
+            border-color: rgba(249, 115, 22, 0.6);
+            box-shadow: 0 30px 60px -12px rgba(249, 115, 22, 0.25), inset 0 1px 0 rgba(255, 255, 255, 0.15);
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(12px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .animate-fade-in {
+            animation: fadeIn 0.45s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+        }
+
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+        ::-webkit-scrollbar-track {
+            background: #030407;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #c2410c;
+            border-radius: 4px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: #f97316;
+        }
+    </style>
+</head>
+<body class="selection:bg-orange-500 selection:text-slate-950 relative cad-grid">
+
+    <!-- Background Glow Orbs -->
+    <div class="fixed inset-0 overflow-hidden pointer-events-none z-0">
+        <div class="orb-1 absolute top-10 right-1/4 w-[500px] h-[500px] bg-orange-600/15 rounded-full blur-[130px]"></div>
+        <div class="orb-2 absolute bottom-10 left-1/4 w-[500px] h-[500px] bg-amber-600/10 rounded-full blur-[130px]"></div>
+    </div>
+
+    <div id="root" class="relative z-10"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect } = React;
+
+        // ==========================================
+        // CONFIGURATION SUPABASE
+        // ==========================================
+        const SUPABASE_URL = 'https://bqriocsrcvxdwhxtbtwc.supabase.co';
+        const SUPABASE_ANON_KEY = 'sb_publishable_PMrgSH1fxz8eJZGpUr-eBw_3lunSZLf';
+
+        let supabaseClient = null;
+        if (window.supabase) {
+            supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+        }
+
+        const SCHOOLS = [
+            'שדות סילבר',
+            'קמפוס',
+            'ניצני קטיף',
+            'חופים',
+            'שקמה',
+            'ניצן',
+            'באר גנים',
+            'מדרשה'
+        ];
+
+        const ADMIN_USER = 'elad';
+        const ADMIN_PASS = '8520';
+
+        function App() {
+            const [mode, setMode] = useState('STUDENT');
+            const [submissions, setSubmissions] = useState([]);
+            const [loadingData, setLoadingData] = useState(false);
+            const [selectedAdminSchool, setSelectedAdminSchool] = useState(null);
+
+            const [usernameInput, setUsernameInput] = useState('');
+            const [passwordInput, setPasswordInput] = useState('');
+            const [loginError, setLoginError] = useState(false);
+
+            const [studentName, setStudentName] = useState('');
+            const [school, setSchool] = useState('');
+            const [modelName, setModelName] = useState('');
+            const [file, setFile] = useState(null);
+            const [isSubmitting, setIsSubmitting] = useState(false);
+            const [isSuccess, setIsSuccess] = useState(false);
+
+            const [editingItem, setEditingItem] = useState(null);
+            const [editStudent, setEditStudent] = useState('');
+            const [editModel, setEditModel] = useState('');
+            const [editSchool, setEditSchool] = useState('');
+
+            const [isZipping, setIsZipping] = useState(false);
+
+            useEffect(() => {
+                fetchSubmissions();
+            }, []);
+
+            const fetchSubmissions = async () => {
+                if (!supabaseClient) return;
+                setLoadingData(true);
+                try {
+                    const { data, error } = await supabaseClient
+                        .from('submissions')
+                        .select('*')
+                        .order('created_at', { ascending: false });
+
+                    if (error) throw error;
+                    if (data) {
+                        setSubmissions(data.map(item => ({
+                            id: item.id,
+                            student: item.student_name,
+                            school: item.school,
+                            modelName: item.model_name,
+                            fileName: item.file_name,
+                            fileUrl: item.file_url,
+                            date: new Date(item.created_at).toLocaleTimeString('he-IL', { hour: '2-digit', minute: '2-digit' })
+                        })));
+                    }
+                } catch (err) {
+                    console.error('Error fetching submissions:', err);
+                } finally {
+                    setLoadingData(false);
+                }
+            };
+
+            const triggerConfetti = () => {
+                if (window.confetti) {
+                    window.confetti({
+                        particleCount: 150,
+                        spread: 110,
+                        origin: { y: 0.6 },
+                        colors: ['#f97316', '#fbbf24', '#ea580c', '#ffffff']
+                    });
+                }
+            };
+
+            const handleStudentSubmit = async (e) => {
+                e.preventDefault();
+                if (!school) {
+                    alert('חובה לבחור בית ספר מהרשימה לפני השליחה!');
+                    return;
+                }
+                if (!file) {
+                    alert('חובה לצרף קובץ STL');
+                    return;
+                }
+
+                if (!supabaseClient) {
+                    alert('שגיאה: טרם הוגדרו נתוני החיבור ל-Supabase בקוד!');
+                    return;
+                }
+
+                setIsSubmitting(true);
+                try {
+                    const fileExt = file.name.split('.').pop();
+                    const fileName = `${Date.now()}_${Math.random().toString(36).substring(2, 7)}.${fileExt}`;
+                    const filePath = `stl_files/${fileName}`;
+
+                    const { error: uploadError } = await supabaseClient.storage
+                        .from('maker-bucket')
+                        .upload(filePath, file);
+
+                    if (uploadError) throw uploadError;
+
+                    const { data: publicUrlData } = supabaseClient.storage
+                        .from('maker-bucket')
+                        .getPublicUrl(filePath);
+
+                    const fileUrl = publicUrlData.publicUrl;
+
+                    const { error: insertError } = await supabaseClient
+                        .from('submissions')
+                        .insert([
+                            {
+                                student_name: studentName,
+                                school: school,
+                                model_name: modelName,
+                                file_name: file.name,
+                                file_url: fileUrl
+                            }
+                        ])
+                        .select();
+
+                    if (insertError) throw insertError;
+
+                    setIsSuccess(true);
+                    triggerConfetti();
+                    fetchSubmissions();
+                } catch (err) {
+                    console.error(err);
+                    alert('שגיאה בשמירת הנתונים בענן: ' + err.message);
+                } finally {
+                    setIsSubmitting(false);
+                }
+            };
+
+            const handleCloseApp = () => {
+                try {
+                    window.close();
+                } catch (e) {}
+                setStudentName('');
+                setSchool('');
+                setModelName('');
+                setFile(null);
+                setIsSuccess(false);
+            };
+
+            const handleLoginSubmit = (e) => {
+                e.preventDefault();
+                if (usernameInput === ADMIN_USER && passwordInput === ADMIN_PASS) {
+                    setMode('ADMIN');
+                    setLoginError(false);
+                    setUsernameInput('');
+                    setPasswordInput('');
+                } else {
+                    setLoginError(true);
+                }
+            };
+
+            const handleDelete = async (id) => {
+                if (!confirm('האם אתה בטוח שברצונך למחוק את ההגשה הזו לצמיתות מהענן?')) return;
+                
+                try {
+                    const { error } = await supabaseClient
+                        .from('submissions')
+                        .delete()
+                        .eq('id', id);
+
+                    if (error) throw error;
+                    setSubmissions(submissions.filter(s => s.id !== id));
+                } catch (err) {
+                    console.error(err);
+                    alert('שגיאה במחיקת ההגשה');
+                }
+            };
+
+            const startEditing = (item) => {
+                setEditingItem(item);
+                setEditStudent(item.student);
+                setEditModel(item.modelName);
+                setEditSchool(item.school);
+            };
+
+            const handleSaveEdit = async (e) => {
+                e.preventDefault();
+                try {
+                    const { error } = await supabaseClient
+                        .from('submissions')
+                        .update({
+                            student_name: editStudent,
+                            model_name: editModel,
+                            school: editSchool
+                        })
+                        .eq('id', editingItem.id);
+
+                    if (error) throw error;
+
+                    setSubmissions(submissions.map(s => {
+                        if (s.id === editingItem.id) {
+                            return { ...s, student: editStudent, modelName: editModel, school: editSchool };
+                        }
+                        return s;
+                    }));
+                    setEditingItem(null);
+                } catch (err) {
+                    console.error(err);
+                    alert('שגיאה בעדכון הפרטים');
+                }
+            };
+
+            const handleBatchDownloadZip = async (schoolName) => {
+                const schoolItems = submissions.filter(s => s.school === schoolName);
+                if (schoolItems.length === 0) {
+                    alert('אין קבצים להורדה בבית ספר זה.');
+                    return;
+                }
+
+                setIsZipping(true);
+                try {
+                    const zip = new JSZip();
+                    const folder = zip.folder(schoolName);
+
+                    for (let item of schoolItems) {
+                        if (item.fileUrl) {
+                            const response = await fetch(item.fileUrl);
+                            const blob = await response.blob();
+                            folder.file(`${item.student}_${item.fileName}`, blob);
+                        }
+                    }
+
+                    const content = await zip.generateAsync({ type: "blob" });
+                    const url = URL.createObjectURL(content);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = `${schoolName}_STL_Files.zip`;
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    URL.revokeObjectURL(url);
+                } catch (err) {
+                    console.error(err);
+                    alert('שגיאה בהורדת קובצי ה-ZIP מהענן');
+                } finally {
+                    setIsZipping(false);
+                }
+            };
+
+            return (
+                <div className="min-h-screen flex flex-col justify-between p-4 sm:p-8 max-w-6xl mx-auto space-y-8">
+                    
+                    <header className="glass-panel rounded-3xl p-5 flex flex-col sm:flex-row items-center justify-between gap-5 border-orange-500/30">
+                        <div className="flex items-center gap-4">
+                            <div className="w-12 h-12 rounded-2xl bg-gradient-to-tr from-orange-600 via-amber-500 to-yellow-400 flex items-center justify-center font-black text-slate-950 text-xl shadow-lg shadow-orange-500/40 relative group">
+                                <div className="absolute inset-0 rounded-2xl bg-orange-400/30 blur-md group-hover:blur-lg transition"></div>
+                                <span className="relative z-10 font-mono">3D</span>
+                            </div>
+                            <div>
+                                <h1 className="text-xl font-extrabold tracking-wider text-white flex items-center gap-2">
+                                    MAKER-LAB 
+                                    <span className="text-[11px] font-mono text-orange-300 bg-orange-950/90 px-3 py-1 rounded-full border border-orange-500/40">
+                                        CLOUD DATABASE CONNECTED ☁️
+                                    </span>
+                                </h1>
+                                <p className="text-xs text-orange-200/70 mt-0.5">מערכת חכמה לשמירה ענן לצמיתות וניהול הדפסות תלת־ממד</p>
+                            </div>
+                        </div>
+
+                        <div className="flex bg-slate-950/90 p-1.5 rounded-2xl border border-orange-500/30 text-xs">
+                            <button
+                                onClick={() => { setMode('STUDENT'); setSelectedAdminSchool(null); }}
+                                className={`px-5 py-2.5 rounded-xl font-bold transition-all duration-300 ${mode === 'STUDENT' ? 'bg-gradient-to-r from-orange-500 to-amber-500 text-slate-950 shadow-md shadow-orange-500/40 scale-[1.02]' : 'text-orange-200/70 hover:text-white'}`}
+                            >
+                                🎓 פורטל תלמיד (הגשה)
+                            </button>
+                            <button
+                                onClick={() => { if(mode !== 'ADMIN') setMode('LOGIN'); }}
+                                className={`px-5 py-2.5 rounded-xl font-bold transition-all duration-300 ${mode === 'ADMIN' || mode === 'LOGIN' ? 'bg-gradient-to-r from-orange-600 to-red-600 text-white shadow-md shadow-orange-600/40 scale-[1.02]' : 'text-orange-200/70 hover:text-white'}`}
+                            >
+                                🖥️ חדר בקרה (מורה)
+                            </button>
+                        </div>
+                    </header>
+
+                    {mode === 'STUDENT' && !isSuccess && (
+                        <section className="glass-panel rounded-3xl p-6 sm:p-10 relative overflow-hidden flex flex-col md:flex-row items-center justify-between gap-8 border-orange-500/30">
+                            <div className="space-y-3 text-right max-w-xl z-10">
+                                <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-orange-500/10 border border-orange-500/30 text-orange-400 text-xs font-bold font-mono">
+                                    <span>⚡ שמירה אוטומטית בענן לעבודה מכל מחשב</span>
+                                </div>
+                                <h2 className="text-3xl sm:text-4xl font-black tracking-tight text-white">
+                                    מהרעיון שלך — <span className="text-transparent bg-clip-text bg-gradient-to-r from-orange-400 via-amber-300 to-yellow-400">להדפסה תלת־ממדית</span>
+                                </h2>
+                                <p className="text-sm text-slate-300 leading-relaxed">
+                                    מגישים את הקובץ מכל עמדה בעבודה, והנתונים נשמרים מיד בבסיס הנתונים המרכזי עבור חדר הבקרה!
+                                </p>
+                            </div>
+
+                            <div className="relative z-10 flex items-center justify-center p-6">
+                                <div style={{ perspective: '800px' }}>
+                                    <div className="wireframe-cube">
+                                        <div className="cube-face cube-front"></div>
+                                        <div className="cube-face cube-back"></div>
+                                        <div className="cube-face cube-right"></div>
+                                        <div className="cube-face cube-left"></div>
+                                        <div className="cube-face cube-top"></div>
+                                        <div className="cube-face cube-bottom"></div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div className="absolute -left-10 -bottom-10 w-72 h-72 bg-orange-500/10 rounded-full blur-3xl pointer-events-none"></div>
+                        </section>
+                    )}
+
+                    {mode === 'STUDENT' && (
+                        <main className="max-w-xl mx-auto w-full animate-fade-in">
+                            {!isSuccess ? (
+                                <div className="glass-panel p-8 sm:p-10 rounded-3xl space-y-6 text-right border-orange-500/40">
+                                    <div className="border-b border-orange-500/20 pb-5">
+                                        <span className="text-xs font-bold text-orange-400 uppercase tracking-widest font-mono">// טופס הגשה מאובטח לענן</span>
+                                        <h3 className="text-2xl font-extrabold text-white mt-1">שליחת קובץ להדפסה</h3>
+                                        <p className="text-xs text-orange-200/70 mt-1">מלא את הפרטים שלך, בחר בית ספר וצרף את קובץ ה-STL.</p>
+                                    </div>
+
+                                    <form onSubmit={handleStudentSubmit} className="space-y-5 text-xs">
+                                        <div>
+                                            <label className="text-orange-200 font-bold block mb-1.5">שם מלא (תלמיד/ה)</label>
+                                            <input 
+                                                type="text" 
+                                                required
+                                                value={studentName}
+                                                onChange={(e) => setStudentName(e.target.value)}
+                                                placeholder="לדוגמה: יונתן כהן"
+                                                className="w-full bg-slate-950/90 border border-orange-500/30 rounded-2xl p-4 text-sm text-white focus:border-orange-400 focus:ring-4 focus:ring-orange-500/30 outline-none transition-all shadow-inner"
+                                            />
+                                        </div>
+
+                                        <div>
+                                            <label className="text-orange-200 font-bold block mb-1.5">בחר את בית הספר שלך</label>
+                                            <select 
+                                                value={school}
+                                                onChange={(e) => setSchool(e.target.value)}
+                                                required
+                                                className="w-full bg-slate-950/90 border border-orange-500/30 rounded-2xl p-4 text-sm text-white focus:border-orange-400 focus:ring-4 focus:ring-orange-500/30 outline-none transition-all shadow-inner cursor-pointer"
+                                            >
+                                                <option value="" disabled className="bg-slate-900 text-slate-400">-- בחר בית ספר מהרשימה --</option>
+                                                {SCHOOLS.map(s => <option key={s} value={s} className="bg-slate-900 text-white">{s}</option>)}
+                                            </select>
+                                        </div>
+
+                                        <div>
+                                            <label className="text-orange-200 font-bold block mb-1.5">שם התוצר / פרויקט</label>
+                                            <input 
+                                                type="text" 
+                                                required
+                                                value={modelName}
+                                                onChange={(e) => setModelName(e.target.value)}
+                                                placeholder="לדוגמה: מחזיק מפתחות רובוט"
+                                                className="w-full bg-slate-950/90 border border-orange-500/30 rounded-2xl p-4 text-sm text-white focus:border-orange-400 focus:ring-4 focus:ring-orange-500/30 outline-none transition-all shadow-inner"
+                                            />
+                                        </div>
+
+                                        <div>
+                                            <label className="text-orange-200 font-bold block mb-1.5">העלאת קובץ STL מטינקרכאד</label>
+                                            <div className="border-2 border-dashed border-orange-500/40 hover:border-orange-400 rounded-2xl p-7 text-center bg-slate-950/50 hover:bg-slate-950/80 transition-all relative cursor-pointer group shadow-inner">
+                                                <input 
+                                                    type="file" 
+                                                    accept=".stl"
+                                                    required
+                                                    onChange={(e) => setFile(e.target.files[0])}
+                                                    className="absolute inset-0 opacity-0 cursor-pointer"
+                                                />
+                                                <div className="space-y-2.5">
+                                                    <div className="w-12 h-12 rounded-2xl bg-orange-500/10 text-orange-400 border border-orange-500/30 flex items-center justify-center text-xl mx-auto group-hover:scale-110 transition-transform">
+                                                        📁
+                                                    </div>
+                                                    <p className="text-sm font-bold text-orange-100">
+                                                        {file ? `קובץ נבחר: ${file.name}` : 'גרור לכאן קובץ STL או לחץ לבחירה'}
+                                                    </p>
+                                                    <p className="text-[11px] text-orange-300/60 font-mono">פורמט נתמך: .STL בלבד</p>
+                                                </div>
+                                            </div>
+                                        </div>
+
+                                        <button 
+                                            type="submit"
+                                            disabled={isSubmitting}
+                                            className="w-full py-4 rounded-2xl bg-gradient-to-r from-orange-500 via-amber-500 to-yellow-500 text-slate-950 font-extrabold text-sm shadow-xl shadow-orange-500/40 hover:scale-[1.01] active:scale-95 transition-all uppercase tracking-wider disabled:opacity-50"
+                                        >
+                                            {isSubmitting ? 'מעלה קובץ ושומר בענן...' : '⚡ שלח קובץ להדפסה במעבדה'}
+                                        </button>
+                                    </form>
+                                </div>
+                            ) : (
+                                <div className="glass-panel p-10 rounded-3xl space-y-6 text-center border-emerald-500/60 shadow-2xl shadow-emerald-500/20 animate-fade-in">
+                                    <div className="w-20 h-20 bg-emerald-500/20 text-emerald-300 border border-emerald-500/50 rounded-3xl flex items-center justify-center text-4xl mx-auto shadow-inner">
+                                        ✓
+                                    </div>
+                                    <div>
+                                        <span className="text-xs font-bold text-emerald-400 uppercase tracking-widest font-mono">// נשמר בהצלחה בענן</span>
+                                        <h3 className="text-2xl font-extrabold text-white mt-1">מעולה, הקובץ נשלח בהצלחה!</h3>
+                                        <p className="text-xs text-orange-200/70 mt-2">הקובץ נשמר במערכת הענן והועבר לתור ההדפסות של המורה.</p>
+                                    </div>
+
+                                    <div className="bg-slate-950/90 p-5 rounded-2xl text-right border border-orange-500/30 space-y-2.5 text-xs">
+                                        <p><strong className="text-orange-400/70">תלמיד:</strong> <span className="text-white font-bold">{studentName}</span></p>
+                                        <p><strong className="text-orange-400/70">בית ספר:</strong> <span className="text-white font-bold">{school}</span></p>
+                                        <p><strong className="text-orange-400/70">פרויקט:</strong> <span className="text-white font-bold">{modelName}</span></p>
+                                        <p><strong className="text-orange-400/70">קובץ:</strong> <span className="text-white font-bold">{file?.name}</span></p>
+                                    </div>
+
+                                    <button 
+                                        onClick={handleCloseApp}
+                                        className="w-full py-3.5 rounded-2xl bg-slate-900 hover:bg-slate-800 text-orange-200 font-bold text-xs transition-all border border-orange-500/30 hover:scale-[1.01]"
+                                    >
+                                        סגירת האפליקציה ✕
+                                    </button>
+                                </div>
+                            )}
+                        </main>
+                    )}
+
+                    {mode === 'LOGIN' && (
+                        <main className="max-w-md mx-auto w-full animate-fade-in">
+                            <div className="glass-panel p-8 sm:p-10 rounded-3xl space-y-6 text-right border-orange-500/50">
+                                <div className="border-b border-orange-500/20 pb-5">
+                                    <span className="text-xs font-bold text-orange-400 uppercase tracking-widest font-mono">// אזור מאובטח</span>
+                                    <h3 className="text-2xl font-extrabold text-white mt-1">כניסת מורה / מדריך</h3>
+                                    <p className="text-xs text-orange-200/70 mt-1">הזן פרטי גישה לניהול חדר הבקרה מכל מחשב.</p>
+                                </div>
+
+                                <form onSubmit={handleLoginSubmit} className="space-y-4 text-xs">
+                                    <div>
+                                        <label className="text-orange-200 font-bold block mb-1.5">שם משתמש</label>
+                                        <input 
+                                            type="text" 
+                                            required
+                                            value={usernameInput}
+                                            onChange={(e) => setUsernameInput(e.target.value)}
+                                            placeholder="הכנס שם משתמש..."
+                                            className="w-full bg-slate-950/90 border border-orange-500/30 rounded-2xl p-4 text-sm text-white focus:border-orange-400 outline-none transition-all shadow-inner"
+                                        />
+                                    </div>
+
+                                    <div>
+                                        <label className="text-orange-200 font-bold block mb-1.5">קוד סודי</label>
+                                        <input 
+                                            type="password" 
+                                            required
+                                            value={passwordInput}
+                                            onChange={(e) => setPasswordInput(e.target.value)}
+                                            placeholder="הכנס קוד סודי..."
+                                            className="w-full bg-slate-950/90 border border-orange-500/30 rounded-2xl p-4 text-sm text-white focus:border-orange-400 outline-none transition-all shadow-inner"
+                                        />
+                                    </div>
+
+                                    {loginError && (
+                                        <div className="p-3.5 bg-rose-950/80 border border-rose-500/60 text-rose-300 rounded-2xl text-center font-bold">
+                                            שם משתמש או קוד סודי שגויים!
+                                        </div>
+                                    )}
+
+                                    <button 
+                                        type="submit"
+                                        className="w-full py-4 rounded-2xl bg-gradient-to-r from-orange-600 to-red-600 hover:from-orange-500 hover:to-red-500 text-white font-extrabold text-sm shadow-lg shadow-orange-600/40 transition-all hover:scale-[1.02] uppercase tracking-wider"
+                                    >
+                                        כניסה לחדר הבקרה 🔒
+                                    </button>
+                                </form>
+                            </div>
+                        </main>
+                    )}
+
+                    {mode === 'ADMIN' && (
+                        <main className="space-y-6 animate-fade-in text-right">
+                            
+                            {!selectedAdminSchool ? (
+                                <div className="space-y-6">
+                                    <div className="glass-panel p-6 rounded-3xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 border-orange-500/40">
+                                        <div>
+                                            <span className="text-xs font-bold text-orange-400 uppercase tracking-widest font-mono">// לוח בקרה ענני ראשי</span>
+                                            <h3 className="text-2xl font-extrabold text-white mt-0.5">בחר בית ספר לצפייה וניהול קבצים</h3>
+                                        </div>
+                                        <div className="flex items-center gap-3">
+                                            <button 
+                                                onClick={fetchSubmissions}
+                                                className="px-4 py-2 bg-slate-900 hover:bg-slate-800 text-orange-300 rounded-xl text-xs font-bold transition-all border border-orange-500/30 flex items-center gap-1.5"
+                                            >
+                                                🔄 רענן נתונים
+                                            </button>
+                                            <span className="px-4 py-2 bg-slate-950/90 text-orange-300 border border-orange-500/40 rounded-xl text-xs font-bold font-mono">
+                                                סה"כ קבצים בענן: {submissions.length}
+                                            </span>
+                                            <button 
+                                                onClick={() => setMode('STUDENT')}
+                                                className="px-4 py-2 bg-slate-900 hover:bg-slate-800 text-orange-200 rounded-xl text-xs font-bold transition-all border border-orange-500/30"
+                                            >
+                                                התנתק 🚪
+                                            </button>
+                                        </div>
+                                    </div>
+
+                                    {loadingData ? (
+                                        <div className="text-center py-20 text-orange-400 font-bold animate-pulse">טוען נתונים מן הענן...</div>
+                                    ) : (
+                                        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-5">
+                                            {SCHOOLS.map((sch) => {
+                                                const count = submissions.filter(s => s.school === sch).length;
+                                                return (
+                                                    <div 
+                                                        key={sch}
+                                                        onClick={() => setSelectedAdminSchool(sch)}
+                                                        className="glass-panel p-6 rounded-3xl cursor-pointer space-y-4 flex flex-col justify-between border-orange-500/30 hover:border-orange-400 hover:scale-[1.02] transition-all duration-300 group"
+                                                    >
+                                                        <div className="space-y-2">
+                                                            <div className="w-10 h-10 rounded-2xl bg-orange-500/15 text-orange-300 border border-orange-500/40 flex items-center justify-center text-lg group-hover:rotate-12 transition-transform">🏫</div>
+                                                            <h4 className="font-extrabold text-base text-white">{sch}</h4>
+                                                        </div>
+
+                                                        <div className="flex items-center justify-between border-t border-orange-500/20 pt-3 text-xs">
+                                                            <span className="text-orange-200/60">קבצים ממתינים:</span>
+                                                            <span className={`px-3 py-1 rounded-full font-bold font-mono ${count > 0 ? 'bg-orange-500/25 text-orange-300 border border-orange-500/50' : 'bg-slate-900 text-slate-500'}`}>
+                                                                {count}
+                                                            </span>
+                                                        </div>
+                                                    </div>
+                                                );
+                                            })}
+                                        </div>
+                                    )}
+                                </div>
+                            ) : (
+                                <div className="glass-panel p-6 sm:p-8 rounded-3xl space-y-6 border-orange-500/40">
+                                    <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 border-b border-orange-500/20 pb-5">
+                                        <div>
+                                            <button 
+                                                onClick={() => setSelectedAdminSchool(null)}
+                                                className="text-xs font-bold text-orange-400 hover:underline mb-1 inline-block"
+                                            >
+                                                ← חזרה לכל בתי הספר
+                                            </button>
+                                            <h3 className="text-2xl font-extrabold text-white">{selectedAdminSchool}</h3>
+                                        </div>
+
+                                        <button
+                                            onClick={() => handleBatchDownloadZip(selectedAdminSchool)}
+                                            disabled={isZipping}
+                                            className="px-5 py-3.5 rounded-2xl bg-gradient-to-r from-orange-500 to-amber-500 text-slate-950 font-extrabold text-xs shadow-lg shadow-orange-500/40 hover:scale-105 transition-all uppercase tracking-wider flex items-center gap-2 disabled:opacity-50"
+                                        >
+                                            <span>📦</span> {isZipping ? 'מכין קובץ ZIP מהענן...' : 'הורד תיקיית ZIP מרוכזת (מכל הקבצים בענן)'}
+                                        </button>
+                                    </div>
+
+                                    <div className="overflow-x-auto">
+                                        <table className="w-full text-right text-xs">
+                                            <thead>
+                                                <tr className="border-b border-orange-500/20 text-orange-300/70 font-bold font-mono">
+                                                    <th className="pb-3 pr-2">ID</th>
+                                                    <th className="pb-3">שם התלמיד</th>
+                                                    <th className="pb-3">שם התוצר</th>
+                                                    <th className="pb-3">קובץ STL בענן</th>
+                                                    <th className="pb-3">זמן הגשה</th>
+                                                    <th className="pb-3">פעולות מנהל</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody className="divide-y divide-orange-500/15">
+                                                {submissions.filter(s => s.school === selectedAdminSchool).length === 0 ? (
+                                                    <tr>
+                                                        <td colSpan="6" className="py-12 text-center text-orange-200/50 font-medium">אין עדיין קבצים שהוגשו מבית ספר זה.</td>
+                                                    </tr>
+                                                ) : (
+                                                    submissions.filter(s => s.school === selectedAdminSchool).map((item) => (
+                                                        <tr key={item.id} className="hover:bg-orange-500/10 transition-colors">
+                                                            <td className="py-4 pr-2 text-orange-400 font-bold font-mono">#{item.id}</td>
+                                                            <td className="py-4 font-bold text-white text-sm">{item.student}</td>
+                                                            <td className="py-4 text-orange-100">{item.modelName}</td>
+                                                            <td className="py-4">
+                                                                <a 
+                                                                    href={item.fileUrl} 
+                                                                    target="_blank" 
+                                                                    rel="noopener noreferrer"
+                                                                    className="text-orange-300 font-semibold hover:underline bg-orange-950/80 px-2.5 py-1 rounded-lg border border-orange-500/40 inline-flex items-center gap-1.5 transition hover:bg-orange-900"
+                                                                >
+                                                                    📥 {item.fileName}
+                                                                </a>
+                                                            </td>
+                                                            <td className="py-4 text-orange-200/60 font-mono">{item.date}</td>
+                                                            <td className="py-4 flex items-center gap-2">
+                                                                <button 
+                                                                    onClick={() => startEditing(item)}
+                                                                    className="px-3 py-1.5 bg-amber-500/20 text-amber-300 border border-amber-500/40 rounded-xl font-bold hover:bg-amber-500/30 transition-all hover:scale-105"
+                                                                >
+                                                                    ✏️ ערוך
+                                                                </button>
+                                                                <button 
+                                                                    onClick={() => handleDelete(item.id)}
+                                                                    className="px-3 py-1.5 bg-rose-500/20 text-rose-300 border border-rose-500/40 rounded-xl font-bold hover:bg-rose-500/30 transition-all hover:scale-105"
+                                                                >
+                                                                    🗑️ מחק
+                                                                </button>
+                                                            </td>
+                                                        </tr>
+                                                    ))
+                                                )}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            )}
+
+                        </main>
+                    )}
+
+                    {editingItem && (
+                        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/85 backdrop-blur-md animate-fade-in">
+                            <div className="glass-panel w-full max-w-md p-8 rounded-3xl space-y-6 text-right border-amber-500/50 shadow-2xl">
+                                <div className="flex items-center justify-between border-b border-orange-500/20 pb-4">
+                                    <h4 className="font-extrabold text-lg text-white">עריכת פרטי הגשה #{editingItem.id}</h4>
+                                    <button onClick={() => setEditingItem(null)} className="text-orange-300 hover:text-white font-bold text-base">✕</button>
+                                </div>
+
+                                <form onSubmit={handleSaveEdit} className="space-y-4 text-xs">
+                                    <div>
+                                        <label className="text-orange-200 font-bold block mb-1.5">שם התלמיד/ה</label>
+                                        <input 
+                                            type="text" 
+                                            required
+                                            value={editStudent}
+                                            onChange={(e) => setEditStudent(e.target.value)}
+                                            className="w-full bg-slate-950 border border-orange-500/30 rounded-2xl p-3.5 text-sm text-white focus:border-amber-400 outline-none transition"
+                                        />
+                                    </div>
+
+                                    <div>
+                                        <label className="text-orange-200 font-bold block mb-1.5">בית ספר</label>
+                                        <select 
+                                            value={editSchool}
+                                            onChange={(e) => setEditSchool(e.target.value)}
+                                            required
+                                            className="w-full bg-slate-950 border border-orange-500/30 rounded-2xl p-3.5 text-sm text-white focus:border-amber-400 outline-none transition cursor-pointer"
+                                        >
+                                            {SCHOOLS.map(s => <option key={s} value={s} className="bg-slate-950 text-white">{s}</option>)}
+                                        </select>
+                                    </div>
+
+                                    <div>
+                                        <label className="text-orange-200 font-bold block mb-1.5">שם התוצר / פרויקט</label>
+                                        <input 
+                                            type="text" 
+                                            required
+                                            value={editModel}
+                                            onChange={(e) => setEditModel(e.target.value)}
+                                            className="w-full bg-slate-950 border border-orange-500/30 rounded-2xl p-3.5 text-sm text-white focus:border-amber-400 outline-none transition"
+                                        />
+                                    </div>
+
+                                    <div className="flex gap-3 pt-2">
+                                        <button 
+                                            type="button"
+                                            onClick={() => setEditingItem(null)}
+                                            className="flex-1 py-3.5 rounded-2xl bg-slate-900 hover:bg-slate-800 text-orange-200 font-bold transition border border-orange-500/30 hover:scale-[1.01]"
+                                        >
+                                            ביטול
+                                        </button>
+                                        <button 
+                                            type="submit"
+                                            className="flex-1 py-3.5 rounded-2xl bg-gradient-to-r from-amber-500 to-yellow-500 text-slate-950 font-extrabold shadow-lg shadow-amber-500/30 transition-all hover:scale-[1.02] uppercase tracking-wider"
+                                        >
+                                            💾 שמור שינויים
+                                        </button>
+                                    </div>
+                                </form>
+                            </div>
+                        </div>
+                    )}
+
+                    <footer className="border-t border-orange-500/20 pt-6 text-center text-xs text-orange-300/50 font-medium font-mono">
+                        MAKER-LAB CLOUD PORTAL // ARCHITECTED BY Elad Pereg © 2026
+                    </footer>
+
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
